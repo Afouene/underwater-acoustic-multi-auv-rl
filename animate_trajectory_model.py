@@ -1,21 +1,17 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import torch
+from stable_baselines3 import PPO
 
-# ======================================================
-#            IMPORT ENV + BASELINE (UNCHANGED)
-# ======================================================
-
-from environment1auv import AUV2DEnv          # your env
-from baseline_greedy_aoi_goal import greedy_aoi_goal_policy     # your baseline
-from baseline_communication_first import communication_first_policy
+from environment1auv import AUV2DEnv  # your env
 
 
 # ======================================================
 #        RUN ONE EPISODE AND RECORD EVERYTHING
 # ======================================================
 
-def run_episode(env, policy_fn, max_steps=200):
+def run_episode_with_model(env, model, max_steps=200, deterministic=True):
     obs = env.reset()
 
     traj = []
@@ -34,8 +30,12 @@ def run_episode(env, policy_fn, max_steps=200):
 
         prev_occ = env.occ.copy()
 
-        action = policy_fn(env)
-        obs, reward, done, _ = env.step(action)
+        action, _ = model.predict(obs, deterministic=deterministic)
+
+        # SB3 sometimes returns shape (n,) or (1,n); make it 1D
+        action = np.array(action).reshape(-1)
+
+        obs, reward, done, info = env.step(action)
 
         # check if a successful transmission happened
         if not np.array_equal(prev_occ, env.occ):
@@ -43,15 +43,17 @@ def run_episode(env, policy_fn, max_steps=200):
             total_data_bits += 12_000 * 25
 
         step += 1
+
+        # safety (in case env doesn't set done correctly)
+        if hasattr(env, "max_steps") and step >= env.max_steps:
+            break
+        print("Age of Information:", env.AoI)
+    # record final
     traj.append(env.pos.copy())
     aoi_hist.append(env.AoI.copy())
     data_hist.append(total_data_bits)
 
-    return (
-        np.array(traj),
-        np.array(aoi_hist),
-        np.array(data_hist),
-    )
+    return np.array(traj), np.array(aoi_hist), np.array(data_hist)
 
 
 # ======================================================
@@ -85,15 +87,14 @@ def animate_episode(env, traj, aoi_hist, data_hist):
 
     # ---- Total data counter ----
     data_text = ax.text(
-    0.98, 0.02,
-    "Total data: 0.0 kB",
-    transform=ax.transAxes,
-    fontsize=11,
-    color="blue",
-    horizontalalignment="right",
-    verticalalignment="bottom"
-)
-
+        0.98, 0.02,
+        "Total data: 0.0 kB",
+        transform=ax.transAxes,
+        fontsize=11,
+        color="blue",
+        horizontalalignment="right",
+        verticalalignment="bottom"
+    )
 
     # ---- AUV trajectory ----
     (auv_line,) = ax.plot([], [], "b-", lw=2, label="AUV")
@@ -111,7 +112,9 @@ def animate_episode(env, traj, aoi_hist, data_hist):
         x = traj[:frame + 1, 0]
         y = traj[:frame + 1, 1]
         auv_line.set_data(x, y)
-        auv_dot.set_data(x[-1], y[-1])
+
+        # (fix deprecation warning: pass sequences)
+        auv_dot.set_data([x[-1]], [y[-1]])
 
         # AoI update
         for k, txt in enumerate(aoi_texts):
@@ -128,9 +131,9 @@ def animate_episode(env, traj, aoi_hist, data_hist):
         update,
         frames=len(traj),
         init_func=init,
-        interval=80,
+        interval=300,
         blit=False,
-        repeat=False      # IMPORTANT: run once only
+        repeat=False
     )
 
     plt.show()
@@ -142,14 +145,31 @@ def animate_episode(env, traj, aoi_hist, data_hist):
 
 if __name__ == "__main__":
 
-    env = AUV2DEnv()
+    MODEL_PATH = "auv2d_runs/best_model/PPO_large_model/best_model.zip"
+   # MODEL_PATH = "auv2d_runs/models/PPO_large_model_final.zip"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print("Running greedy baseline (no rendering)...")
-    traj, aoi_hist, data_hist = run_episode(
+    env = AUV2DEnv()
+    model = PPO.load(MODEL_PATH, device=device)
+
+    print("Running PPO policy (no rendering)...")
+    traj, aoi_hist, data_hist = run_episode_with_model(
         env,
-        policy_fn=communication_first_policy,
-        max_steps=200
+        model=model,
+        max_steps=200,
+        deterministic=True
     )
 
     print("Animating episode (single run, final state stays)...")
+    
     animate_episode(env, traj, aoi_hist, data_hist)
+    final_pos = traj[-1]
+    final_avg_aoi = np.mean(aoi_hist[-1])
+    
+    print("\n" + "=" * 60)
+    print("EPISODE SUMMARY (AFTER ANIMATION)")
+    print("length of the trajectory:", len(traj))
+    print("=" * 60)
+    print(f"Final AUV position : ({final_pos[0]:.2f}, {final_pos[1]:.2f})")
+    print(f"Final average AoI  : {final_avg_aoi:.2f}")
+    print(f"Total data sent   : {data_hist[-1] / 8 / 1e3:.1f} kB")

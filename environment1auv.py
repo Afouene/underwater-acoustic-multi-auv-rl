@@ -39,6 +39,11 @@ def propulsion_energy(V, d):
 # ======================================================
 
 class AUV2DEnv(gym.Env):
+    """
+    MultiDiscrete action space (smooth discretization):
+
+      action = (dtheta_idx, dv_idx, sel_w, sel_d)
+    """
 
     def __init__(self):
         super().__init__()
@@ -48,7 +53,7 @@ class AUV2DEnv(gym.Env):
         self.ymin, self.ymax = 0.0, 10.0
 
         # -------- Goal --------
-        self.goal = np.array([9.5, 9.5])
+        self.goal = np.array([8.3, 8.3])
         self.goal_radius = 0.3
 
         # -------- Sensor Nodes --------
@@ -69,10 +74,14 @@ class AUV2DEnv(gym.Env):
         self.theta = 0.0
         self.v = 1.0
 
-        self.dt = 1.0
+        self.dt = 0.25
         self.w_theta = np.deg2rad(25)
         self.w_v = 0.4
         self.v_max = 4.0
+
+        # -------- Control discretization --------
+        self.K_theta = 11   # smooth heading
+        self.K_v = 7        # smooth speed
 
         # -------- AoI & Fairness --------
         self.AoI = np.ones(self.N)
@@ -83,22 +92,25 @@ class AUV2DEnv(gym.Env):
         # -------- Energy --------
         self.E_init = 2e6
         self.E = self.E_init
-        self.E_nodes = np.zeros(self.N)
+        self.E_nodes = 0.1*np.zeros(self.N)
 
         # -------- Episode --------
-        self.max_steps = 200
+        self.max_steps = 50
         self.step_count = 0
         self.trajectory = []
 
-        # -------- Action space --------
-        self.action_space = spaces.Dict({
-            "motion": spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32),
-            "sel_wet": spaces.Discrete(self.N),
-            "sel_data": spaces.Discrete(self.N),
-        })
+        # ==================================================
+        #               ACTION SPACE
+        # ==================================================
+        self.action_space = spaces.MultiDiscrete([
+            self.K_theta,   # dtheta
+            self.K_v,       # dv
+            self.N,         # sel_w
+            self.N          # sel_d
+        ])
 
         # -------- Observation --------
-        obs_dim = 4 + 2*self.N
+        obs_dim = 4 + 2*self.N + 2*self.N + self.N
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -109,10 +121,12 @@ class AUV2DEnv(gym.Env):
         self.pos = self.start_pos.copy()
         self.theta = 0.0
         self.v = 1.0
+
         self.AoI[:] = 1
         self.occ[:] = 0
-        self.E_nodes[:] = 0
+        self.E_nodes[:] = 0.1
         self.E = self.E_init
+
         self.step_count = 0
         self.trajectory = [self.pos.copy()]
         return self._obs()
@@ -123,107 +137,120 @@ class AUV2DEnv(gym.Env):
         self.step_count += 1
         reward = 0.0
 
-        dtheta, dv = action["motion"]
-        sel_w = int(action["sel_wet"])
-        sel_d = int(action["sel_data"])
+        # -------- Decode discrete actions --------
+        dtheta_idx, dv_idx, sel_w, sel_d = action
+        #print("action:", action)
+        dtheta = 2.0 * dtheta_idx / (self.K_theta - 1) - 1.0
+        dv     = 2.0 * dv_idx     / (self.K_v     - 1) - 1.0
 
-        # -------- Motion --------
-        self.theta += dtheta * self.w_theta
-        self.v = np.clip(self.v + dv*self.w_v, 0.0, self.v_max)
+        # -------- Motion (candidate) --------
+        theta_new = self.theta + dtheta * self.w_theta
+        v_new = np.clip(self.v + dv * self.w_v, 0.0, self.v_max)
 
+        pos_new = self.pos + v_new * self.dt * np.array([
+            np.cos(theta_new),
+            np.sin(theta_new)
+        ])
+
+        # -------- Boundary handling (NO CLIP) --------
+        if not (self.xmin <= pos_new[0] <= self.xmax and
+                self.ymin <= pos_new[1] <= self.ymax):
+            reward -= 20.0
+            pos_new = self.pos.copy()  # do not move
+            v_new = self.v
+            theta_new = self.theta
+
+        # apply motion
         prev = self.pos.copy()
-        self.pos += self.v * np.array([np.cos(self.theta), np.sin(self.theta)])
-        dist = np.linalg.norm(self.pos - prev)
-        self.E -= propulsion_energy(self.v, dist)
-
-        if not (self.xmin <= self.pos[0] <= self.xmax and
-                self.ymin <= self.pos[1] <= self.ymax):
-            return self._obs(), -200.0, True, {}
+        self.pos = pos_new
+        self.theta = theta_new
+        self.v = v_new
 
         self.trajectory.append(self.pos.copy())
 
-        # ==================================================
-        #              ACOUSTIC ENERGY HARVESTING
-        # ==================================================
+        # -------- Energy cost --------
+        dist = np.linalg.norm(self.pos - prev)
+        if dist < 1e-2:
+            reward -= 1.0
+        self.E -= propulsion_energy(self.v, dist)
 
+        # -------- Goal shaping --------
+        reward += np.linalg.norm(prev - self.goal) - np.linalg.norm(self.pos - self.goal)
+
+        # ==================================================
+        #              ENERGY HARVESTING
+        # ==================================================
         r = np.linalg.norm(self.nodes[sel_w] - self.pos)
         r_m = 100 * r
 
-        f_kHz = 70
-        beacon_Pelec = 5.0
-        eta_tx = 0.7
-        DI_tx = 10
-        DI_rx = 10
+        TL = transmission_loss(70, r_m)
+        SL = 170.8 + 10*np.log10(5.0) + 10*np.log10(0.7) + 10
+        RL = received_level(SL, TL, 10)
 
-        TL = transmission_loss(f_kHz, r_m)
-        SL = 170.8 + 10*np.log10(beacon_Pelec) + 10*np.log10(eta_tx) + DI_tx
-        RL = received_level(SL, TL, DI_rx)
-
-        P_h = harvested_power(RL)
-        E_h = P_h * 25
-        self.E_nodes[sel_w] += E_h
+        self.E_nodes[sel_w] += harvested_power(RL) * 25
 
         # ==================================================
-        #              INFORMATION TRANSMISSION
+        #              DATA TRANSMISSION
         # ==================================================
-
         r = np.linalg.norm(self.nodes[sel_d] - self.pos)
         r_m = 100 * r
 
-        f_kHz = 50
-        BW = 1000
-        rate = 12_000
-        NL_spec = 40
+        TL = transmission_loss(50, r_m)
+        NL_band = 40 + 10*np.log10(1000)
+        gamma = 2**(12000 / 1000) - 1
+        SL_req = required_source_level(10*np.log10(gamma), TL, NL_band)
+        E_req = electrical_power_from_SL(SL_req) * 25
+        # --- Feasibility shaping: encourage getting into the region where TX is possible ---
+        margin = self.E_nodes[sel_d] - E_req              # >0 means feasible
+        reward += 2.0 * np.tanh(margin / (E_req + 1e-12)) # smooth signal in [-2, +2]
 
-        TL = transmission_loss(f_kHz, r_m)
-        NL_band = NL_spec + 10*np.log10(BW)
-
-        gamma = 2**(rate / BW) - 1
-        SNR_dB = 10*np.log10(gamma)
-
-        SL_req = required_source_level(SNR_dB, TL, NL_band)
-        P_tx = electrical_power_from_SL(SL_req)
-        E_req = P_tx * 25
 
         if self.E_nodes[sel_d] >= E_req:
             self.E_nodes[sel_d] -= E_req
             self.AoI[sel_d] = 0
             self.occ[sel_d] += 1
         else:
-            reward -= 2.0
+            reward -= 0.02
 
-        # -------- AoI Update --------
+        # -------- AoI --------
         self.AoI = np.minimum(self.AoI + 1, self.AoI_max)
 
         # -------- Fairness --------
-        sum_occ = np.sum(self.occ)
-        sum_sq = np.sum(self.occ**2)
-        Jain = (sum_occ**2) / (self.N * sum_sq) if sum_sq > 0 else 0.0
-        reward -= self.lambda_fair * (1 - Jain)
+        if np.sum(self.occ) > 3:
+            s1 = np.sum(self.occ)
+            s2 = np.sum(self.occ**2)
+            Jain = (s1**2) / (self.N * s2)
+            reward -= self.lambda_fair * (1 - Jain)
 
-        # -------- Other rewards --------
-        reward -= 0.05 * (abs(dtheta) + abs(dv))
-        reward -= np.mean(self.AoI)
-        reward -= 0.1 * np.linalg.norm(self.pos - self.goal)
+        # -------- Other penalties --------
+        reward -= 0.1 * np.mean(self.AoI)
 
         # -------- Goal --------
         if np.linalg.norm(self.pos - self.goal) <= self.goal_radius:
-            reward += 300.0
-            return self._obs(), reward, True, {}
+            reward += 200.0
+            done = True
+        else:
+            done = (self.step_count >= self.max_steps) or (self.E <= 0)
 
-        done = self.step_count >= self.max_steps or self.E <= 0
         return self._obs(), reward, done, {}
 
     # ======================================================
 
     def _obs(self):
+        rel_pos = self.nodes - self.pos  # shape (N, 2)
+        dists = np.linalg.norm(rel_pos, axis=1) # shape (N,)
         return np.hstack([
             self.pos,
-            self.theta,
-            self.v,
+            [self.theta, self.v],
             self.AoI,
-            self.E_nodes
+            self.E_nodes,
+            rel_pos.flatten(),
+            dists          
         ]).astype(np.float32)
+
+    def seed(self, seed=None):
+        np.random.seed(seed)
+        return [seed]
 
     # ======================================================
 
@@ -231,7 +258,7 @@ class AUV2DEnv(gym.Env):
         traj = np.array(self.trajectory)
         plt.figure(figsize=(6,6))
         plt.plot(traj[:,0], traj[:,1], '-b', label='AUV')
-        plt.scatter(self.nodes[:,0], self.nodes[:,1], c='r', marker='s')
+        plt.scatter(self.nodes[:,0], self.nodes[:,1], c='r', marker='s', label='Nodes')
         plt.scatter(*self.start_pos, c='g', label='Start')
         plt.scatter(*self.goal, c='k', marker='*', s=150, label='Goal')
         plt.grid()
