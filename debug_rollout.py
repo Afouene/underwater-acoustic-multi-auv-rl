@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from environment1auv import AUV2DEnv   # <<< CHANGE if your env file name is different
+from environment1auv import AUV2DEnv   
 
 
 def run_random_debug(seed=0):

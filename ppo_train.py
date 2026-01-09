@@ -52,7 +52,7 @@ class AoITrackingEvalCallback(EvalCallback):
 
 # ---------------- Directories ----------------
 def setup_directories():
-    base = "auv2d_runs"
+    base = "auv2d_runs_new_aoi_update"
     models_dir = os.path.join(base, "models")
     logdir = os.path.join(base, "tb_logs")
     ckpt_dir = os.path.join(base, "checkpoints")

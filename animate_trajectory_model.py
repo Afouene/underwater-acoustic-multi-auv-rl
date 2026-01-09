@@ -23,7 +23,6 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
     done = False
 
     while not done and step < max_steps:
-        # record state BEFORE action
         traj.append(env.pos.copy())
         aoi_hist.append(env.AoI.copy())
         data_hist.append(total_data_bits)
@@ -31,24 +30,18 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
         prev_occ = env.occ.copy()
 
         action, _ = model.predict(obs, deterministic=deterministic)
-
-        # SB3 sometimes returns shape (n,) or (1,n); make it 1D
         action = np.array(action).reshape(-1)
 
         obs, reward, done, info = env.step(action)
 
-        # check if a successful transmission happened
         if not np.array_equal(prev_occ, env.occ):
-            # rate = 12 kbps, duration = 25 s
-            total_data_bits += 12_000 * 25
+            total_data_bits += 12_000 * 25  # 12 kbps × 25 s
 
         step += 1
 
-        # safety (in case env doesn't set done correctly)
         if hasattr(env, "max_steps") and step >= env.max_steps:
             break
-        print("Age of Information:", env.AoI)
-    # record final
+
     traj.append(env.pos.copy())
     aoi_hist.append(env.AoI.copy())
     data_hist.append(total_data_bits)
@@ -60,7 +53,11 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
 #              ANIMATION (RUN ONCE, STATIC END)
 # ======================================================
 
-def animate_episode(env, traj, aoi_hist, data_hist):
+def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
+
+    num_steps = len(traj) - 1
+    total_time_sec = num_steps * step_duration
+
     fig, ax = plt.subplots(figsize=(6, 6))
 
     ax.set_xlim(env.xmin, env.xmax)
@@ -85,7 +82,7 @@ def animate_episode(env, traj, aoi_hist, data_hist):
         )
         aoi_texts.append(txt)
 
-    # ---- Total data counter ----
+    # ---- Total data counter (bottom-right) ----
     data_text = ax.text(
         0.98, 0.02,
         "Total data: 0.0 kB",
@@ -94,6 +91,18 @@ def animate_episode(env, traj, aoi_hist, data_hist):
         color="blue",
         horizontalalignment="right",
         verticalalignment="bottom"
+    )
+
+    # ---- Steps & time (TOP-RIGHT) ----
+    steps_text = ax.text(
+        0.98, 0.98,
+        f"Steps: {num_steps}\n"
+        f"Total time: {total_time_sec:.0f} s",
+        transform=ax.transAxes,
+        fontsize=11,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=dict(facecolor="white", alpha=0.85, edgecolor="gray")
     )
 
     # ---- AUV trajectory ----
@@ -105,26 +114,21 @@ def animate_episode(env, traj, aoi_hist, data_hist):
     def init():
         auv_line.set_data([], [])
         auv_dot.set_data([], [])
-        return auv_line, auv_dot, *aoi_texts, data_text
+        return auv_line, auv_dot, *aoi_texts, data_text, steps_text
 
     def update(frame):
-        # trajectory
         x = traj[:frame + 1, 0]
         y = traj[:frame + 1, 1]
         auv_line.set_data(x, y)
-
-        # (fix deprecation warning: pass sequences)
         auv_dot.set_data([x[-1]], [y[-1]])
 
-        # AoI update
         for k, txt in enumerate(aoi_texts):
             txt.set_text(f"AoI={int(aoi_hist[frame, k])}")
 
-        # data counter (bits → kB)
         data_kB = data_hist[frame] / 8 / 1e3
         data_text.set_text(f"Total data: {data_kB:.1f} kB")
 
-        return auv_line, auv_dot, *aoi_texts, data_text
+        return auv_line, auv_dot, *aoi_texts, data_text, steps_text
 
     ani = FuncAnimation(
         fig,
@@ -145,8 +149,7 @@ def animate_episode(env, traj, aoi_hist, data_hist):
 
 if __name__ == "__main__":
 
-    MODEL_PATH = "auv2d_runs/best_model/PPO_large_model/best_model.zip"
-   # MODEL_PATH = "auv2d_runs/models/PPO_large_model_final.zip"
+    MODEL_PATH = "auv2d_runs_new_aoi_update/best_model/PPO_large_model/best_model.zip"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     env = AUV2DEnv()
@@ -160,16 +163,19 @@ if __name__ == "__main__":
         deterministic=True
     )
 
-    print("Animating episode (single run, final state stays)...")
-    
-    animate_episode(env, traj, aoi_hist, data_hist)
+    num_steps = len(traj) - 1
+    total_time = num_steps * 25
     final_pos = traj[-1]
     final_avg_aoi = np.mean(aoi_hist[-1])
-    
+
     print("\n" + "=" * 60)
-    print("EPISODE SUMMARY (AFTER ANIMATION)")
-    print("length of the trajectory:", len(traj))
+    print("EPISODE SUMMARY")
     print("=" * 60)
+    print(f"Trajectory length  : {num_steps} steps")
+    print(f"Total mission time : {total_time:.0f} s")
     print(f"Final AUV position : ({final_pos[0]:.2f}, {final_pos[1]:.2f})")
     print(f"Final average AoI  : {final_avg_aoi:.2f}")
     print(f"Total data sent   : {data_hist[-1] / 8 / 1e3:.1f} kB")
+
+    print("\nAnimating episode (single run, final state stays)...")
+    animate_episode(env, traj, aoi_hist, data_hist)

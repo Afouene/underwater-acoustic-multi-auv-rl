@@ -6,9 +6,10 @@ from matplotlib.animation import FuncAnimation
 #            IMPORT ENV + BASELINE (UNCHANGED)
 # ======================================================
 
-from environment1auv import AUV2DEnv          # your env
-from baseline_greedy_aoi_goal import greedy_aoi_goal_policy     # your baseline
+from environment1auv import AUV2DEnv
+from baseline_greedy_aoi_goal import greedy_aoi_goal_policy
 from baseline_communication_first import communication_first_policy
+from baseline_round_robin import round_robin_policy
 
 
 # ======================================================
@@ -27,7 +28,6 @@ def run_episode(env, policy_fn, max_steps=200):
     done = False
 
     while not done and step < max_steps:
-        # record state BEFORE action
         traj.append(env.pos.copy())
         aoi_hist.append(env.AoI.copy())
         data_hist.append(total_data_bits)
@@ -37,28 +37,27 @@ def run_episode(env, policy_fn, max_steps=200):
         action = policy_fn(env)
         obs, reward, done, _ = env.step(action)
 
-        # check if a successful transmission happened
         if not np.array_equal(prev_occ, env.occ):
-            # rate = 12 kbps, duration = 25 s
-            total_data_bits += 12_000 * 25
+            total_data_bits += 12_000 * 25  # 12 kbps × 25 s
 
         step += 1
+
     traj.append(env.pos.copy())
     aoi_hist.append(env.AoI.copy())
     data_hist.append(total_data_bits)
 
-    return (
-        np.array(traj),
-        np.array(aoi_hist),
-        np.array(data_hist),
-    )
+    return np.array(traj), np.array(aoi_hist), np.array(data_hist)
 
 
 # ======================================================
 #              ANIMATION (RUN ONCE, STATIC END)
 # ======================================================
 
-def animate_episode(env, traj, aoi_hist, data_hist):
+def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
+
+    num_steps = len(traj) - 1
+    total_time_sec = num_steps * step_duration
+
     fig, ax = plt.subplots(figsize=(6, 6))
 
     ax.set_xlim(env.xmin, env.xmax)
@@ -83,17 +82,28 @@ def animate_episode(env, traj, aoi_hist, data_hist):
         )
         aoi_texts.append(txt)
 
-    # ---- Total data counter ----
+    # ---- Total data (bottom-right) ----
     data_text = ax.text(
-    0.98, 0.02,
-    "Total data: 0.0 kB",
-    transform=ax.transAxes,
-    fontsize=11,
-    color="blue",
-    horizontalalignment="right",
-    verticalalignment="bottom"
-)
+        0.98, 0.02,
+        "Total data: 0.0 kB",
+        transform=ax.transAxes,
+        fontsize=11,
+        color="blue",
+        horizontalalignment="right",
+        verticalalignment="bottom"
+    )
 
+    # ---- Steps & time (TOP-RIGHT) ----
+    steps_text = ax.text(
+        0.98, 0.98,
+        f"Steps: {num_steps}\n"
+        f"Total time: {total_time_sec:.0f} s",
+        transform=ax.transAxes,
+        fontsize=11,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=dict(facecolor="white", alpha=0.85, edgecolor="gray")
+    )
 
     # ---- AUV trajectory ----
     (auv_line,) = ax.plot([], [], "b-", lw=2, label="AUV")
@@ -104,24 +114,21 @@ def animate_episode(env, traj, aoi_hist, data_hist):
     def init():
         auv_line.set_data([], [])
         auv_dot.set_data([], [])
-        return auv_line, auv_dot, *aoi_texts, data_text
+        return auv_line, auv_dot, *aoi_texts, data_text, steps_text
 
     def update(frame):
-        # trajectory
         x = traj[:frame + 1, 0]
         y = traj[:frame + 1, 1]
         auv_line.set_data(x, y)
         auv_dot.set_data(x[-1], y[-1])
 
-        # AoI update
         for k, txt in enumerate(aoi_texts):
             txt.set_text(f"AoI={int(aoi_hist[frame, k])}")
 
-        # data counter (bits → kB)
         data_kB = data_hist[frame] / 8 / 1e3
         data_text.set_text(f"Total data: {data_kB:.1f} kB")
 
-        return auv_line, auv_dot, *aoi_texts, data_text
+        return auv_line, auv_dot, *aoi_texts, data_text, steps_text
 
     ani = FuncAnimation(
         fig,
@@ -130,7 +137,7 @@ def animate_episode(env, traj, aoi_hist, data_hist):
         init_func=init,
         interval=80,
         blit=False,
-        repeat=False      # IMPORTANT: run once only
+        repeat=False
     )
 
     plt.show()
@@ -147,9 +154,17 @@ if __name__ == "__main__":
     print("Running greedy baseline (no rendering)...")
     traj, aoi_hist, data_hist = run_episode(
         env,
-        policy_fn=communication_first_policy,
+        policy_fn=greedy_aoi_goal_policy,
         max_steps=200
     )
+
+    num_steps = len(traj) - 1
+    total_time = num_steps * 25
+    final_avg_aoi = np.mean(aoi_hist[-1])
+
+    print(f"Final average AoI   : {final_avg_aoi:.2f}")
+    print(f"Trajectory length  : {num_steps} steps")
+    print(f"Total mission time : {total_time:.0f} s")
 
     print("Animating episode (single run, final state stays)...")
     animate_episode(env, traj, aoi_hist, data_hist)

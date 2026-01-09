@@ -40,8 +40,7 @@ def propulsion_energy(V, d):
 
 class AUV2DEnv(gym.Env):
     """
-    MultiDiscrete action space (smooth discretization):
-
+    MultiDiscrete action space:
       action = (dtheta_idx, dv_idx, sel_w, sel_d)
     """
 
@@ -80,8 +79,8 @@ class AUV2DEnv(gym.Env):
         self.v_max = 4.0
 
         # -------- Control discretization --------
-        self.K_theta = 11   # smooth heading
-        self.K_v = 7        # smooth speed
+        self.K_theta = 11
+        self.K_v = 7
 
         # -------- AoI & Fairness --------
         self.AoI = np.ones(self.N)
@@ -89,24 +88,26 @@ class AUV2DEnv(gym.Env):
         self.occ = np.zeros(self.N)
         self.lambda_fair = 2.0
 
+        # -------- NEW: service accumulation --------
+        self.K_reset = 3                          # REQUIRED number of services
+        self.service_count = np.zeros(self.N)    # per-node counter
+
         # -------- Energy --------
         self.E_init = 2e6
         self.E = self.E_init
-        self.E_nodes = 0.1*np.zeros(self.N)
+        self.E_nodes = 0.1 * np.ones(self.N)
 
         # -------- Episode --------
-        self.max_steps = 50
+        self.max_steps = 80
         self.step_count = 0
         self.trajectory = []
 
-        # ==================================================
-        #               ACTION SPACE
-        # ==================================================
+        # -------- Action space --------
         self.action_space = spaces.MultiDiscrete([
-            self.K_theta,   # dtheta
-            self.K_v,       # dv
-            self.N,         # sel_w
-            self.N          # sel_d
+            self.K_theta,
+            self.K_v,
+            self.N,
+            self.N
         ])
 
         # -------- Observation --------
@@ -124,6 +125,7 @@ class AUV2DEnv(gym.Env):
 
         self.AoI[:] = 1
         self.occ[:] = 0
+        self.service_count[:] = 0
         self.E_nodes[:] = 0.1
         self.E = self.E_init
 
@@ -137,13 +139,12 @@ class AUV2DEnv(gym.Env):
         self.step_count += 1
         reward = 0.0
 
-        # -------- Decode discrete actions --------
+        # -------- Decode action --------
         dtheta_idx, dv_idx, sel_w, sel_d = action
-        #print("action:", action)
         dtheta = 2.0 * dtheta_idx / (self.K_theta - 1) - 1.0
         dv     = 2.0 * dv_idx     / (self.K_v     - 1) - 1.0
 
-        # -------- Motion (candidate) --------
+        # -------- Motion --------
         theta_new = self.theta + dtheta * self.w_theta
         v_new = np.clip(self.v + dv * self.w_v, 0.0, self.v_max)
 
@@ -152,15 +153,13 @@ class AUV2DEnv(gym.Env):
             np.sin(theta_new)
         ])
 
-        # -------- Boundary handling (NO CLIP) --------
         if not (self.xmin <= pos_new[0] <= self.xmax and
                 self.ymin <= pos_new[1] <= self.ymax):
             reward -= 20.0
-            pos_new = self.pos.copy()  # do not move
+            pos_new = self.pos.copy()
             v_new = self.v
             theta_new = self.theta
 
-        # apply motion
         prev = self.pos.copy()
         self.pos = pos_new
         self.theta = theta_new
@@ -200,19 +199,23 @@ class AUV2DEnv(gym.Env):
         gamma = 2**(12000 / 1000) - 1
         SL_req = required_source_level(10*np.log10(gamma), TL, NL_band)
         E_req = electrical_power_from_SL(SL_req) * 25
-        # --- Feasibility shaping: encourage getting into the region where TX is possible ---
-        margin = self.E_nodes[sel_d] - E_req              # >0 means feasible
-        reward += 2.0 * np.tanh(margin / (E_req + 1e-12)) # smooth signal in [-2, +2]
 
+        margin = self.E_nodes[sel_d] - E_req
+        reward += 2.0 * np.tanh(margin / (E_req + 1e-12))
 
         if self.E_nodes[sel_d] >= E_req:
             self.E_nodes[sel_d] -= E_req
-            self.AoI[sel_d] = 0
+            self.service_count[sel_d] += 1
             self.occ[sel_d] += 1
+
+            # -------- AoI reset ONLY after K services --------
+            if self.service_count[sel_d] >= self.K_reset:
+                self.AoI[sel_d] = 1
+                self.service_count[sel_d] = 0
         else:
             reward -= 0.02
 
-        # -------- AoI --------
+        # -------- AoI aging --------
         self.AoI = np.minimum(self.AoI + 1, self.AoI_max)
 
         # -------- Fairness --------
@@ -222,7 +225,7 @@ class AUV2DEnv(gym.Env):
             Jain = (s1**2) / (self.N * s2)
             reward -= self.lambda_fair * (1 - Jain)
 
-        # -------- Other penalties --------
+        # -------- AoI penalty --------
         reward -= 0.1 * np.mean(self.AoI)
 
         # -------- Goal --------
@@ -237,21 +240,19 @@ class AUV2DEnv(gym.Env):
     # ======================================================
 
     def _obs(self):
-        rel_pos = self.nodes - self.pos  # shape (N, 2)
-        dists = np.linalg.norm(rel_pos, axis=1) # shape (N,)
+        rel_pos = self.nodes - self.pos
+        dists = np.linalg.norm(rel_pos, axis=1)
         return np.hstack([
             self.pos,
             [self.theta, self.v],
             self.AoI,
             self.E_nodes,
             rel_pos.flatten(),
-            dists          
+            dists
         ]).astype(np.float32)
-
-    def seed(self, seed=None):
-        np.random.seed(seed)
+    def seed(self, seed=None): 
+        np.random.seed(seed) 
         return [seed]
-
     # ======================================================
 
     def plot_trajectory(self):

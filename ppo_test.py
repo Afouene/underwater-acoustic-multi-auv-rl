@@ -7,7 +7,7 @@ from environment1auv import AUV2DEnv   # your SB3-compatible env
 
 # ---------------- Config ----------------
 MODEL_PATH = "auv2d_runs/models/PPO_large_model_final.zip"
-MODEL_PATH ="auv2d_runs/best_model/PPO_large_model/best_model.zip"
+MODEL_PATH ="auv2d_runs_new_aoi_update/models/PPO_large_model_final.zip"
 NUM_EPISODES = 1
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
