@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 # ======================================================
-#            IMPORT ENV + BASELINE (UNCHANGED)
+#            IMPORT ENV + BASELINES
 # ======================================================
 
 from environment1auv import AUV2DEnv
@@ -28,6 +28,7 @@ def run_episode(env, policy_fn, max_steps=200):
     done = False
 
     while not done and step < max_steps:
+        # record BEFORE action
         traj.append(env.pos.copy())
         aoi_hist.append(env.AoI.copy())
         data_hist.append(total_data_bits)
@@ -37,11 +38,16 @@ def run_episode(env, policy_fn, max_steps=200):
         action = policy_fn(env)
         obs, reward, done, _ = env.step(action)
 
+        # count successful data transmission
         if not np.array_equal(prev_occ, env.occ):
             total_data_bits += 12_000 * 25  # 12 kbps × 25 s
 
         step += 1
 
+        if hasattr(env, "max_steps") and step >= env.max_steps:
+            break
+
+    # record final state
     traj.append(env.pos.copy())
     aoi_hist.append(env.AoI.copy())
     data_hist.append(total_data_bits)
@@ -50,7 +56,7 @@ def run_episode(env, policy_fn, max_steps=200):
 
 
 # ======================================================
-#              ANIMATION (RUN ONCE, STATIC END)
+#              ANIMATION (UNCHANGED)
 # ======================================================
 
 def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
@@ -82,7 +88,7 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
         )
         aoi_texts.append(txt)
 
-    # ---- Total data (bottom-right) ----
+    # ---- Total data ----
     data_text = ax.text(
         0.98, 0.02,
         "Total data: 0.0 kB",
@@ -93,7 +99,7 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
         verticalalignment="bottom"
     )
 
-    # ---- Steps & time (TOP-RIGHT) ----
+    # ---- Steps & time ----
     steps_text = ax.text(
         0.98, 0.98,
         f"Steps: {num_steps}\n"
@@ -105,7 +111,6 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="gray")
     )
 
-    # ---- AUV trajectory ----
     (auv_line,) = ax.plot([], [], "b-", lw=2, label="AUV")
     (auv_dot,) = ax.plot([], [], "bo")
 
@@ -151,20 +156,49 @@ if __name__ == "__main__":
 
     env = AUV2DEnv()
 
-    print("Running greedy baseline (no rendering)...")
+    print("Running baseline policy (no rendering)...")
+
     traj, aoi_hist, data_hist = run_episode(
         env,
-        policy_fn=greedy_aoi_goal_policy,
+        policy_fn=greedy_aoi_goal_policy,   # ← swap policy here
+        # policy_fn=round_robin_policy,
+        # policy_fn=communication_first_policy,
         max_steps=200
     )
 
+    # ==================================================
+    #              METRICS (MATCH PPO)
+    # ==================================================
+
     num_steps = len(traj) - 1
     total_time = num_steps * 25
+    final_pos = traj[-1]
+
+    # snapshot AoI
     final_avg_aoi = np.mean(aoi_hist[-1])
 
-    print(f"Final average AoI   : {final_avg_aoi:.2f}")
-    print(f"Trajectory length  : {num_steps} steps")
-    print(f"Total mission time : {total_time:.0f} s")
+    # ---- J_AoI (time-averaged AoI) ----
+    mean_aoi_per_step = np.mean(aoi_hist, axis=1)
+    J_AoI = np.mean(mean_aoi_per_step)
 
-    print("Animating episode (single run, final state stays)...")
+    # ---- Data ----
+    total_data_kB = data_hist[-1] / 8 / 1e3
+    avg_data_per_step = total_data_kB / max(num_steps, 1)
+
+    # ==================================================
+    #              PRINT SUMMARY
+    # ==================================================
+
+    print("\n" + "=" * 60)
+    print("BASELINE EPISODE SUMMARY")
+    print("=" * 60)
+    print(f"Trajectory length       : {num_steps} steps")
+    print(f"Total mission time      : {total_time:.0f} s")
+    print(f"Final AUV position      : ({final_pos[0]:.2f}, {final_pos[1]:.2f})")
+    print(f"Final average AoI       : {final_avg_aoi:.2f}")
+    print(f"Time-averaged AoI J_AoI : {J_AoI:.2f}")
+    print(f"Total data sent         : {total_data_kB:.1f} kB")
+    print(f"Avg data per step       : {avg_data_per_step:.2f} kB/step")
+
+    print("\nAnimating episode...")
     animate_episode(env, traj, aoi_hist, data_hist)

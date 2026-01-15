@@ -61,10 +61,19 @@ class AUV2DEnv(gym.Env):
             [8, 5],
             [5, 9],
             [3, 7],
-            [5, 2],
-            [9, 2],
             [2, 4],
+            [9, 2],
+            [5, 2],
+            [7, 8],
+            [8, 2],
+            [7, 3],
+            [7, 1],
+            [3, 1],
+            [9, 7]
         ])
+        """
+       
+            """
         self.N = len(self.nodes)
 
         # -------- AUV State --------
@@ -98,7 +107,7 @@ class AUV2DEnv(gym.Env):
         self.E_nodes = 0.1 * np.ones(self.N)
 
         # -------- Episode --------
-        self.max_steps = 80
+        self.max_steps = 72
         self.step_count = 0
         self.trajectory = []
 
@@ -230,7 +239,7 @@ class AUV2DEnv(gym.Env):
 
         # -------- Goal --------
         if np.linalg.norm(self.pos - self.goal) <= self.goal_radius:
-            reward += 200.0
+            reward += 60.0
             done = True
         else:
             done = (self.step_count >= self.max_steps) or (self.E <= 0)

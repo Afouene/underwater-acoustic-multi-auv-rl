@@ -23,6 +23,7 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
     done = False
 
     while not done and step < max_steps:
+        # record BEFORE action
         traj.append(env.pos.copy())
         aoi_hist.append(env.AoI.copy())
         data_hist.append(total_data_bits)
@@ -34,6 +35,7 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
 
         obs, reward, done, info = env.step(action)
 
+        # count successful data transmission
         if not np.array_equal(prev_occ, env.occ):
             total_data_bits += 12_000 * 25  # 12 kbps × 25 s
 
@@ -42,6 +44,7 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
         if hasattr(env, "max_steps") and step >= env.max_steps:
             break
 
+    # record final state
     traj.append(env.pos.copy())
     aoi_hist.append(env.AoI.copy())
     data_hist.append(total_data_bits)
@@ -50,7 +53,7 @@ def run_episode_with_model(env, model, max_steps=200, deterministic=True):
 
 
 # ======================================================
-#              ANIMATION (RUN ONCE, STATIC END)
+#              ANIMATION (STATIC FINAL STATE)
 # ======================================================
 
 def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
@@ -82,7 +85,7 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
         )
         aoi_texts.append(txt)
 
-    # ---- Total data counter (bottom-right) ----
+    # ---- Total data counter ----
     data_text = ax.text(
         0.98, 0.02,
         "Total data: 0.0 kB",
@@ -93,7 +96,7 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
         verticalalignment="bottom"
     )
 
-    # ---- Steps & time (TOP-RIGHT) ----
+    # ---- Steps & time ----
     steps_text = ax.text(
         0.98, 0.98,
         f"Steps: {num_steps}\n"
@@ -149,13 +152,16 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
 
 if __name__ == "__main__":
 
-    MODEL_PATH = "auv2d_runs_new_aoi_update/best_model/PPO_large_model/best_model.zip"
+    MODEL_PATH = "auv2d_runs_13nodes/best_model/PPO_small_model/best_model.zip"   # for 7 nodes it's  best model ppo large
+    #MODEL_PATH = "auv2d_runs_13nodes/models/PPO_large_model_final.zip"
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     env = AUV2DEnv()
     model = PPO.load(MODEL_PATH, device=device)
 
     print("Running PPO policy (no rendering)...")
+
     traj, aoi_hist, data_hist = run_episode_with_model(
         env,
         model=model,
@@ -163,19 +169,39 @@ if __name__ == "__main__":
         deterministic=True
     )
 
+    # ==================================================
+    #              METRICS
+    # ==================================================
+
     num_steps = len(traj) - 1
     total_time = num_steps * 25
     final_pos = traj[-1]
+
+    # snapshot AoI (for intuition only)
     final_avg_aoi = np.mean(aoi_hist[-1])
+
+    # ---- J_AoI (time-averaged AoI) ----
+    mean_aoi_per_step = np.mean(aoi_hist, axis=1)
+    J_AoI = np.mean(mean_aoi_per_step)
+
+    # ---- Data normalization ----
+    total_data_kB = data_hist[-1] / 8 / 1e3
+    avg_data_per_step = total_data_kB / max(num_steps, 1)
+
+    # ==================================================
+    #              PRINT SUMMARY
+    # ==================================================
 
     print("\n" + "=" * 60)
     print("EPISODE SUMMARY")
     print("=" * 60)
-    print(f"Trajectory length  : {num_steps} steps")
-    print(f"Total mission time : {total_time:.0f} s")
-    print(f"Final AUV position : ({final_pos[0]:.2f}, {final_pos[1]:.2f})")
-    print(f"Final average AoI  : {final_avg_aoi:.2f}")
-    print(f"Total data sent   : {data_hist[-1] / 8 / 1e3:.1f} kB")
+    print(f"Trajectory length       : {num_steps} steps")
+    print(f"Total mission time      : {total_time:.0f} s")
+    print(f"Final AUV position      : ({final_pos[0]:.2f}, {final_pos[1]:.2f})")
+    print(f"Final average AoI       : {final_avg_aoi:.2f}")
+    print(f"Time-averaged AoI J_AoI : {J_AoI:.2f}")
+    print(f"Total data sent         : {total_data_kB:.1f} kB")
+    print(f"Avg data per step       : {avg_data_per_step:.2f} kB/step")
 
-    print("\nAnimating episode (single run, final state stays)...")
+    print("\nAnimating episode...")
     animate_episode(env, traj, aoi_hist, data_hist)

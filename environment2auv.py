@@ -1,358 +1,295 @@
 import gym
 from gym import spaces
 import numpy as np
-import pygame
+import matplotlib.pyplot as plt
 
+# ======================================================
+#                ACOUSTIC & ENERGY HELPERS
+# ======================================================
 
-def thorp_absorption(f_kHz: float) -> float:
-    """Thorp absorption coefficient α [dB / m] for frequency f [kHz]."""
+def thorp_absorption(f_kHz):
     f2 = f_kHz**2
-    return (0.11 * f2/(f2 + 1)
-          + 44   * f2/(f2 + 4100)
-          + 2.75e-4 * f2 + 0.003) * 1e-3
+    return (0.11*f2/(f2+1) + 44*f2/(f2+4100) + 2.75e-4*f2 + 0.003) * 1e-3
 
-def transmission_loss(f_kHz: float, r_m: float, k: float = 1.5) -> float:
-    """One-way TL  =  k·10·log10(r)  +  α·r   [dB]."""
-    return 10*k*np.log10(np.maximum(r_m, 1.0)) + thorp_absorption(f_kHz)*r_m
+def transmission_loss(f_kHz, r_m, k=1.5):
+    return 10*k*np.log10(max(r_m, 1.0)) + thorp_absorption(f_kHz)*r_m
 
-def required_source_level(SNR_dB: float, TL_dB: float, NL_band_dB: float) -> float:
-    """Passive-sonar equation (omni Tx/Rx)."""
-    return SNR_dB + TL_dB + NL_band_dB
-
-def electrical_power_from_SL(SL_dB: float, eta_tx: float = 0.7, DI_tx: float = 10) -> float:
-    """Electrical power that yields source-level SL_dB [W]."""
-    return 10**((SL_dB - 170.8 - 10*np.log10(eta_tx) - DI_tx)/10)
-
-def received_level(SL_dB: float, TL_dB: float, DI_rx: float = 10) -> float:
-    """Acoustic received level at the hydrophone [dB re 1 µPa]."""
+def received_level(SL_dB, TL_dB, DI_rx=10):
     return SL_dB - TL_dB + DI_rx
 
-def harvested_power(RL_dB: float, *, RVS_dB: float = -150, Rp: float = 125,
-                    n_hydro: int = 4, harv_eff: float = 0.7) -> float:
-    """Electrical power harvested at the rectifier [W]."""
-    p_Pa   = 10**(RL_dB/20)                     # acoustic pressure
-    V_ind  = p_Pa * 10**(RVS_dB/20)             # induced voltage
-    P_av   = n_hydro * (V_ind**2) / (4*Rp)      # available power
+def harvested_power(RL_dB, RVS_dB=-150, Rp=125, n_hydro=4, harv_eff=0.7):
+    p_Pa  = 10**(RL_dB / 20)
+    V_ind = p_Pa * 10**(RVS_dB / 20)
+    P_av  = n_hydro * (V_ind**2) / (4 * Rp)
     return harv_eff * P_av
-def calculate_energy_consumption(H, eta,Cd,S,rho,V,d):
+
+def required_source_level(SNR_dB, TL_dB, NL_band_dB):
+    return SNR_dB + TL_dB + NL_band_dB
+
+def electrical_power_from_SL(SL_dB, eta_tx=0.7, DI_tx=10):
+    return 10**((SL_dB - 170.8 - 10*np.log10(eta_tx) - DI_tx) / 10)
+
+def propulsion_energy(V, d):
+    rho, Cd, S, eta, H = 1000, 0.006, 3, 0.7, 40
+    return (((rho * Cd * S * V**3) / (2 * eta)) + H) * (d / max(V, 1e-6))
 
 
-    # Total energy consumption equation
-    E_tot = (((rho * Cd * S * V**3) / (2 * eta)) + H)*(d/V)
+# ======================================================
+#                    ENVIRONMENT (2 AUVs)
+# ======================================================
 
-    return E_tot
-
-
-def sample_rician(K_lin, size=()):
+class AUV2DEnv2AUV(gym.Env):
     """
-    Sample complex Rician fading with linear K-factor K_lin.
-    Returns h ~ Rician( K_lin/(K_lin+1) deterministic + 1/(K_lin+1) diffuse ).
+    Two-AUV environment with Gaussian collision-risk penalty.
+    Each AUV freezes permanently after reaching the goal.
     """
-    # LOS amplitude component
-    nu    = np.sqrt(K_lin/(K_lin+1))
-    # Diffuse component std‐dev (per real/imag)
-    sigma = np.sqrt(1/(2*(K_lin+1)))
-    # real + imag
-    x = nu + sigma * np.random.randn(*size)
-    y =         sigma * np.random.randn(*size)
-    return x + 1j*y
 
-
-class MultiAUVEnvironment(gym.Env):
     def __init__(self):
-        super(MultiAUVEnvironment, self).__init__()
-        self.window_size = 500 
-        self.render_mode = "human"  
-        self.metadata = {"render_fps": 30} 
-        '''pygame.init()
-        self.screen = pygame.display.set_mode((self.window_size, self.window_size))
-        self.clock = pygame.time.Clock() 
-        '''
-        
-        # Max battery for AUVs 
-        self.auv_max_energy = 2158000
+        super().__init__()
 
-        
-        self.auv_positions = [np.array([5, 5, 2]), np.array([8, 8, 2])]
-        self.auv_energy    = [self.auv_max_energy, 
-                              self.auv_max_energy]
-        
+        # -------- Area --------
+        self.xmin, self.xmax = 0.0, 10.0
+        self.ymin, self.ymax = 0.0, 10.0
 
-        self.charging_stations = [
-            np.array([1, 1, 1]),
-            np.array([1, 10, 4]),
-            np.array([10, 1, 4]),
-            np.array([10, 10, 4])
-        ]
-        self.charging_colors = [(0, 255, 255), (0, 200, 200), (0, 150, 150), (0, 100, 100)]
+        # -------- Goal --------
+        self.goal = np.array([8.3, 8.3])
+        self.goal_radius = 0.3
 
-        self.sensor_node_positions = [
-            np.array([1, 1, 1]),
-            np.array([8, 8, 2]),
-            np.array([9, 1, 3]),
-            np.array([1, 6, 4]),
-            np.array([8, 5, 3]),
-            np.array([6, 2, 2]),
-            np.array([4, 4, 3]),
-           np.array([3, 7, 2]),
-            np.array([5, 8, 4]),
-            np.array([6, 9, 3])
-        ]   
-        '''
-       
-          
-            ,
-        ,'''
-       
-        self.num_devices = len(self.sensor_node_positions)
-        self.AoI_all_nodes=[1]*self.num_devices 
-        self.occurence=[0]*self.num_devices
-        self.energy_stored = [0] * self.num_devices 
-        self.energy_harvested=0
+        # -------- Sensor Nodes --------
+        self.nodes = np.array([
+            [1,1],[8,5],[5,9],[3,7],[2,4],
+            [9,2],[5,2],[7,8],[8,2],[7,3],
+            [7,1],[3,1],[9,7]
+        ])
+        self.N = len(self.nodes)
 
-        self.max_iterations=100
-        self.AoI_max=self.max_iterations/2
-        self.reward_per_step=[]
-        self.total_steps=0
-        self.collision_penalty = 15
-        self.num_collision=0
-        self.threshhold=3*21571
+        # -------- AUVs --------
+        self.M = 2
+        self.start_pos = np.array([[0.5,0.5],[0.5,1.5]])
+        self.pos = self.start_pos.copy()
+        self.theta = np.zeros(self.M)
+        self.v = np.ones(self.M)
+        self.reached = np.zeros(self.M, dtype=bool)
 
+        # -------- Motion --------
+        self.dt = 0.25
+        self.w_theta = np.deg2rad(25)
+        self.w_v = 0.4
+        self.v_max = 4.0
+
+        # -------- Control --------
+        self.K_theta = 11
+        self.K_v = 7
+
+        # -------- AoI & Fairness --------
+        self.AoI = np.ones(self.N)
+        self.AoI_max = 50
+        self.occ = np.zeros(self.N)
+        self.lambda_fair = 2.0
+
+        # -------- Service accumulation --------
+        self.K_reset = 3
+        self.service_count = np.zeros(self.N)
+
+        # -------- Energy --------
+        self.E_init = 2e6
+        self.E = self.E_init * np.ones(self.M)
+        self.E_nodes = 0.1 * np.ones(self.N)
+
+        # -------- Collision penalty --------
+        self.alpha_c = 4.0
+        self.sigma_c = 20.0
+        self.d_th = 100.0
+
+
+        # -------- Episode --------
+        self.max_steps = 72
+        self.step_count = 0
+        self.trajectory = [[],[]]
+
+        # -------- Action space --------
         self.action_space = spaces.MultiDiscrete([
-                    6, self.num_devices, self.num_devices,  # AUV 1
-                    6, self.num_devices, self.num_devices   # AUV 2
-                ])
+            self.K_theta, self.K_v, self.N, self.N,
+            self.K_theta, self.K_v, self.N, self.N
+        ])
+
+        # -------- Observation --------
+        obs_dim = 8 + 8*self.N
         self.observation_space = spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(2 * 3 + self.num_devices * 2,)
-                )        
+            low=-np.inf, high=np.inf,
+            shape=(obs_dim,), dtype=np.float32
+        )
 
-    def step(self, action):
-        total_reward = 0
-        self.total_steps += 1
-
-        # Unpack the two AUV actions
-        direction1, wet1, data1 = action[:3]
-        direction2, wet2, data2 = action[3:]
-        done_flags = []
-
-        for i, (direction, sel_wet, sel_data) in enumerate([
-            (direction1, wet1, data1),
-            (direction2, wet2, data2)
-        ]):
-            reward = 0
-            prev_pos = self.auv_positions[i].copy()
-
-            # —— Move (or penalize invalid move) ——
-            possible = self.get_possible_directions(i)
-            if direction in possible:
-                delta = np.array([
-                    1 if direction == 0 else -1 if direction == 1 else 0,
-                    1 if direction == 2 else -1 if direction == 3 else 0,
-                    1 if direction == 4 else -1 if direction == 5 else 0
-                ])
-                new_pos = prev_pos + delta
-                self.auv_positions[i] = new_pos
-            else:
-                reward -= 10
-                new_pos = prev_pos
-
-
-            # —— Energy consumption & check for “done” ——
-            E_move = calculate_energy_consumption(
-                H=40, eta=0.7, Cd=0.006, S=3, rho=1000, V=4, d=100
-            )
-            self.auv_energy[i] -= E_move
-
-            dists = [np.linalg.norm(self.auv_positions[i] - st)
-                     for st in self.charging_stations]
-            min_d = min(dists)
-            E_to_charge = calculate_energy_consumption(
-                H=40, eta=0.7, Cd=0.006, S=3, rho=1000, V=4, d=100 * min_d
-            )
-            done_i = (self.auv_energy[i] < E_to_charge + self.threshhold)
-            done_flags.append(done_i)
-
-            # —— If this AUV is done, teleport it to the nearest *unused* station ——
-            if done_i:
-                taken = {
-                    tuple(self.auv_positions[j])
-                    for j, dj in enumerate(done_flags) if dj and j != i
-                }
-                for idx in np.argsort(dists):
-                    station = self.charging_stations[idx]
-                    if tuple(station) not in taken:
-                        self.auv_positions[i] = station.copy()
-                        break
-
-            # —— Harvesting —— 
-            h = sample_rician(K_lin=10)
-            node_wet_pos = self.sensor_node_positions[sel_wet]
-            r_old = np.linalg.norm(node_wet_pos - prev_pos)
-            r_new = np.linalg.norm(node_wet_pos - new_pos)
-            r_avg = 0.5 * (r_old + r_new)
-            #print(f"AUV {i} Harvest: r_old={r_old:.2f}, r_new={r_new:.2f}, r_avg={r_avg:.2f}")
-
-            E_har = self.compute_harvested_energy(100*r_avg, h)
-            self.energy_stored[sel_wet] += E_har
-            self.energy_harvested    += E_har
-
-            # ── Transmission & DEBUG ──
-            node_data_pos = self.sensor_node_positions[sel_data]
-            r_old = np.linalg.norm(node_data_pos - prev_pos)
-            r_new = np.linalg.norm(node_data_pos - new_pos)
-            r_avg = 0.5 * (r_old + r_new)
-            #print(f"AUV {i} Transmit: r_old={r_old:.2f}, r_new={r_new:.2f}, r_avg={r_avg:.2f}")
-
-            E_req = self.energy_required_for_trans(100*r_avg, h)
-
-            if self.energy_stored[sel_data] > E_req:
-                self.energy_stored[sel_data] -= E_req
-                self.occurence[sel_data] += 1
-                _ = self.update_Age(sel_data)
-                if self.occurence[sel_data] > 27:
-                    reward -= 10
-            else:
-                reward -= 3
-
-            total_reward += reward
-
-        # —— Collision penalty —— 
-        if np.all(np.abs(self.auv_positions[0] - self.auv_positions[1]) <= 1):
-            total_reward -= self.collision_penalty
-            self.num_collision += 1
-
-        # —— AoI & fairness penalty —— 
-        AoI = self.update_all_Age()
-        sum_sq = sum(x**2 for x in self.occurence)
-        sum_val = sum(self.occurence)
-        Jain = (sum_val**2) / (sum_sq * self.num_devices) if sum_sq else 0
-        total_reward -= (1 - Jain) * (np.sum(AoI) / self.num_devices)
-        self.reward_per_step.append(np.sum(AoI) / self.num_devices)
-        # —— Episode termination —— 
-        self.max_iterations -= 1
-        env_done = all(done_flags) or self.max_iterations <= 0
-
-        state = self._get_observation()
-        return state, total_reward, env_done, {}
-
+    # ======================================================
 
     def reset(self):
-        self.auv_positions = [np.array([5, 5, 2]), np.array([8, 8, 2])]
-        self.max_iterations = 100
-        self.auv_max_energy = 2158000
-        self.auv_energy = [self.auv_max_energy, 
-                              self.auv_max_energy]
-        self.total_steps = 0
-        self.AoI_all_nodes = [1] * self.num_devices
-        self.energy_stored = [0] * self.num_devices
-        self.energy_harvested = 0
-        self.occurence = [0] * self.num_devices
-        self.num_collision=0
-        return np.hstack((self.auv_positions[0], self.auv_positions[1], self.AoI_all_nodes, self.energy_stored))
-    
-    def _get_observation(self):
-        return np.hstack((self.auv_positions[0], self.auv_positions[1], self.AoI_all_nodes, self.energy_stored))
+        self.pos = self.start_pos.copy()
+        self.theta[:] = 0.0
+        self.v[:] = 1.0
+        self.reached[:] = False
+        self.E[:] = self.E_init
 
-    
+        self.AoI[:] = 1
+        self.occ[:] = 0
+        self.service_count[:] = 0
+        self.E_nodes[:] = 0.1
+
+        self.step_count = 0
+        self.trajectory = [[self.pos[0].copy()], [self.pos[1].copy()]]
+        return self._obs()
+
+    # ======================================================
+
+    def step(self, action):
+        self.step_count += 1
+        reward = 0.0
+        action = np.array(action).reshape(2,4)
+
+        for i in range(self.M):
+
+            # ===== FREEZE AFTER GOAL =====
+            if self.reached[i]:
+                self.v[i] = 0.0
+                self.trajectory[i].append(self.pos[i].copy())
+                continue
+
+            dtheta_idx, dv_idx, sel_w, sel_d = action[i]
+            dtheta = 2*dtheta_idx/(self.K_theta-1) - 1
+            dv = 2*dv_idx/(self.K_v-1) - 1
+
+            theta_new = self.theta[i] + dtheta*self.w_theta
+            v_new = np.clip(self.v[i] + dv*self.w_v, 0, self.v_max)
+
+            pos_new = self.pos[i] + v_new*self.dt*np.array([
+                np.cos(theta_new), np.sin(theta_new)
+            ])
+
+            if not (self.xmin <= pos_new[0] <= self.xmax and
+                    self.ymin <= pos_new[1] <= self.ymax):
+                reward -= 20.0
+                pos_new = self.pos[i]
+                v_new = self.v[i]
+                theta_new = self.theta[i]
+
+            prev = self.pos[i].copy()
+            self.pos[i] = pos_new
+            self.theta[i] = theta_new
+            self.v[i] = v_new
+            self.trajectory[i].append(self.pos[i].copy())
+
+            dist = np.linalg.norm(self.pos[i]-prev)
+            if dist < 1e-2:
+                reward -= 1.0
+            self.E[i] -= propulsion_energy(self.v[i], dist)
+
+            reward += np.linalg.norm(prev-self.goal) - np.linalg.norm(self.pos[i]-self.goal)
+
+            # ===== Harvest =====
+            r = np.linalg.norm(self.nodes[sel_w]-self.pos[i])
+            TL = transmission_loss(70, 100*r)
+            SL = 170.8 + 10*np.log10(5.0) + 10*np.log10(0.7) + 10
+            RL = received_level(SL, TL, 10)
+            self.E_nodes[sel_w] += harvested_power(RL)*25
+
+            # ===== Data =====
+            r = np.linalg.norm(self.nodes[sel_d]-self.pos[i])
+            TL = transmission_loss(50, 100*r)
+            gamma = 2**(12000/1000)-1
+            SL_req = required_source_level(10*np.log10(gamma), TL, 40+10*np.log10(1000))
+            E_req = electrical_power_from_SL(SL_req)*25
+
+            margin = self.E_nodes[sel_d]-E_req
+            reward += 2*np.tanh(margin/(E_req+1e-12))
+
+            if self.E_nodes[sel_d] >= E_req:
+                self.E_nodes[sel_d] -= E_req
+                self.service_count[sel_d] += 1
+                self.occ[sel_d] += 1
+                if self.service_count[sel_d] >= self.K_reset:
+                    self.AoI[sel_d] = 1
+                    self.service_count[sel_d] = 0
+            else:
+                reward -= 0.02
+
+            if np.linalg.norm(self.pos[i]-self.goal) <= self.goal_radius:
+                self.reached[i] = True
+                self.v[i] = 0.0
+
+        # ===== Collision penalty =====
+        d12 = 100 * np.linalg.norm(self.pos[0] - self.pos[1])   # meters
+
+# --------- thresholded "unsafe distance" ----------
+        violation = max(0.0, self.d_th - d12)   # meters inside unsafe zone
+
+        # Smooth risk in [0, 1): 0 when safe, ~1 when deep inside unsafe zone
+        risk = 1.0 - np.exp(-(violation**2) / (2.0 * self.sigma_c**2))
+
+        # Penalty in [-alpha_c, 0]
+        penalty = -self.alpha_c * risk
+        reward += penalty
+
+        #print(f"d12={d12:.2f} m | violation={violation:.2f} m | risk={risk:.3f} | collision_penalty={penalty:.3f}")
+
+
+        # ===== AoI / fairness =====
+        self.AoI = np.minimum(self.AoI+1, self.AoI_max)
+        if np.sum(self.occ) > 3:
+            J = (np.sum(self.occ)** 2)/(self.N*np.sum(self.occ**2))
+            reward -= self.lambda_fair*(1-J)
+        reward -= 0.1*np.mean(self.AoI)
+
+        done = (np.all(self.reached) or
+                self.step_count >= self.max_steps or
+                np.any(self.E <= 0))
+
+        return self._obs(), reward, done, {
+            "d_auv": d12,
+            "collision": int(d12 < self.d_th),
+            "reached": self.reached.copy()
+        }
+
+    # ======================================================
+
+    def _obs(self):
+        rel1 = self.nodes - self.pos[0]
+        rel2 = self.nodes - self.pos[1]
+        return np.hstack([
+            self.pos[0], [self.theta[0], self.v[0]],
+            self.pos[1], [self.theta[1], self.v[1]],
+            self.AoI,
+            self.E_nodes,
+            rel1.flatten(),
+            rel2.flatten(),
+            np.linalg.norm(rel1,axis=1),
+            np.linalg.norm(rel2,axis=1)
+        ]).astype(np.float32)
+
     def seed(self, seed=None):
-        pass
+        np.random.seed(seed)
+        return [seed]
+    def plot_trajectory(self):
+        traj1 = np.array(self.trajectory[0])
+        traj2 = np.array(self.trajectory[1])
 
-    def compute_harvested_energy(self, r_m: float, h: complex ) -> float:
-        f_kHz        = 70                       # beacon centre-frequency
-        TL_dB        = transmission_loss(f_kHz, r_m)
-        beacon_Pelec = 5                      # W   (electrical power budget)
-        eta_tx       = 0.7
-        DI_tx        = 10                       # directivity gain [dB]
-        DI_rx        = 10                       # hydrophone array gain [dB]
+        plt.figure(figsize=(6, 6))
 
-        # Beacon source level
-        SL_beacon = 170.8 + 10*np.log10(beacon_Pelec) \
-                            + 10*np.log10(eta_tx) + DI_tx
+        if len(traj1) > 0:
+            plt.plot(traj1[:, 0], traj1[:, 1], '-b', label='AUV 1')
+            plt.scatter(traj1[0, 0], traj1[0, 1], c='b', marker='o')
 
-        RL_dB = received_level(SL_beacon, TL_dB, DI_rx)
-        P_har = harvested_power(RL_dB) * (np.abs(h)**2)   # fading gain
-        duration=25
-        return P_har * duration 
-    
+        if len(traj2) > 0:
+            plt.plot(traj2[:, 0], traj2[:, 1], '-g', label='AUV 2')
+            plt.scatter(traj2[0, 0], traj2[0, 1], c='g', marker='o')
 
-    def energy_required_for_trans(self, r_m: float, h: complex ) -> float:
-        f_kHz          = 50
-        BW_Hz          = 1_000          # channel bandwidth
-        data_rate_bps  = 12_000              # payload bits per second
-        TL_dB          = transmission_loss(f_kHz, r_m)
-        NL_spec_dB     = 40             # spectral noise density [dB re 1µPa/√Hz]
-        NL_band_dB     = NL_spec_dB + 10*np.log10(BW_Hz)
- 
-        gamma_lin = 2**(data_rate_bps / BW_Hz) - 1        # required SNR (linear)
-        SNR_req_dB = 10*np.log10(gamma_lin)
+        plt.scatter(self.nodes[:, 0], self.nodes[:, 1],
+                    c='r', marker='s', label='Nodes')
 
-        SL_req_dB = required_source_level(SNR_req_dB, TL_dB, NL_band_dB)
-        P_tx_W    = electrical_power_from_SL(SL_req_dB) * (np.abs(h)**2)
-        duration=25
-        return P_tx_W * duration         
+        plt.scatter(self.goal[0], self.goal[1],
+                    c='k', marker='*', s=150, label='Goal')
 
-    def update_Age(self,node_selected_index):
-        self.AoI_all_nodes[node_selected_index]=0
-        return self.AoI_all_nodes
-    
-    def update_all_Age(self):
-        for i in range(len(self.AoI_all_nodes)):
-                self.AoI_all_nodes[i] = min(self.AoI_max, self.AoI_all_nodes[i] + 1)
-        return self.AoI_all_nodes
-    
-    def get_cumulative_rewards(self):
-        return self.cumulative_rewards
-
-    def get_possible_directions(self, auv_index):
-        auv_position = self.auv_positions[auv_index]
-        possible_mvt = np.ones(6)
-        
-        if auv_position[0] == 1: possible_mvt[1] = 0  # Left boundary
-        if auv_position[0] == 10: possible_mvt[0] = 0  # Right boundary
-        if auv_position[1] == 1: possible_mvt[3] = 0  # Bottom boundary
-        if auv_position[1] == 10: possible_mvt[2] = 0  # Top boundary
-        if auv_position[2] == 1: possible_mvt[5] = 0  # Lowest depth
-        if auv_position[2] == 4: possible_mvt[4] = 0  # Maximum depth
-        
-        return np.where(possible_mvt == 1)[0]
-
-    
-    def render(self):
-        
-       
-        self.screen.fill((255, 255, 255))
-        
-        cell_size = self.window_size // 10
-        for i in range(11):
-            pygame.draw.line(self.screen, (100, 100, 100), (i * cell_size, 0), (i * cell_size, self.window_size), 1)
-            pygame.draw.line(self.screen, (100, 100, 100), (0, i * cell_size), (self.window_size, i * cell_size), 1)
-        
-        # Draw AUVs
-        for i, pos in enumerate(self.auv_positions):
-            color = (0, 0, 255) if i == 0 else (0, 255, 0)  # Different colors for each AUV
-            pygame.draw.circle(self.screen, color, (int(pos[0] * cell_size), int(pos[1] * cell_size)), 5)
-        
-        # Draw sensor nodes
-        for sensor_node_pos in self.sensor_node_positions:
-            node_x = int(sensor_node_pos[0] * cell_size)
-            node_y = int(sensor_node_pos[1] * cell_size)
-            pygame.draw.rect(self.screen, (255, 0, 0), pygame.Rect(node_x - 5, node_y - 5, 10, 10))
-
-
-        for i, station in enumerate(self.charging_stations):
-            station_x = int(station[0] * cell_size)
-            station_y = int(station[1] * cell_size)
-            pygame.draw.circle(self.screen, self.charging_colors[i], 
-                             (station_x, station_y), 10)
-        pygame.display.update()
-        pygame.event.pump()
-        self.clock.tick(self.metadata["render_fps"])
-        pygame.time.delay(200)
-
-    def _render_frame(self):
-        canvas = pygame.Surface((self.window_size, self.window_size))
-        canvas.fill((255, 255, 255))
-        return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
-    
-    def _is_at_charging_station(self, position):
-        return any(np.array_equal(position, station) for station in self.charging_stations)
+        plt.xlim(self.xmin, self.xmax)
+        plt.ylim(self.ymin, self.ymax)
+        plt.grid()
+        plt.legend()
+        plt.title("2-AUV Greedy Trajectories")
+        plt.show()

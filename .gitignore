@@ -22,4 +22,7 @@ logs/
 .DS_Store
 Thumbs.db
 auv2d_runs
-auv2d_runs_new_aoi_update
+auv2d_runs_5nodes
+auv2d_runs_7nodes
+auv2d_runs_10nodes
+auv2d_runs_13nodes
