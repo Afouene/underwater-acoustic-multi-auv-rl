@@ -152,7 +152,7 @@ def animate_episode(env, traj, aoi_hist, data_hist, step_duration=25.0):
 
 if __name__ == "__main__":
 
-    MODEL_PATH = "auv2d_runs_13nodes/best_model/PPO_small_model/best_model.zip"   # for 7 nodes it's  best model ppo large
+    MODEL_PATH = "auv2d_runs_7nodes/best_model/PPO_large_model/best_model.zip"   # for 7 nodes it's  best model ppo large
     #MODEL_PATH = "auv2d_runs_13nodes/models/PPO_large_model_final.zip"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

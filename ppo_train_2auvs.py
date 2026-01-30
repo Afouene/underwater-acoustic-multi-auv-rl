@@ -103,7 +103,7 @@ class MultiAUVTrackingEvalCallback(EvalCallback):
 
 # ---------------- Directories ----------------
 def setup_directories():
-    base = "auv2d_runs_2auvs"
+    base = "auv2d_runs_2auvs_13nodes"
     models_dir = os.path.join(base, "models")
     logdir = os.path.join(base, "tb_logs")
     ckpt_dir = os.path.join(base, "checkpoints")
@@ -194,7 +194,7 @@ def train_one(config, models_dir, logdir, ckpt_dir, best_dir):
     )
 
     model.learn(
-        total_timesteps=12_000_000,
+        total_timesteps=10_000_000,
         callback=callbacks,
         progress_bar=True,
         tb_log_name=run_name,
